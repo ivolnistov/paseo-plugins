@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtemp, mkdir, writeFile, appendFile, rm, readFile, utimes } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, appendFile, rm, readFile, symlink, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -327,4 +327,50 @@ test("provider profiles from Paseo config add every CLAUDE_CONFIG_DIR and CODEX_
     assert.equal(snapshot.sessions.length, 4);
     assert.ok(!JSON.stringify(snapshot).includes("SECRET_MUST_NOT_LEAK"));
   } finally { index.dispose(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("an OpenCode store under the nested launcher data directory is read once, even through a symlinked legacy path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-usage-opencode-"));
+  const roots = { paseo: join(root, "paseo"), claude: join(root, "claude"), codex: join(root, "codex"), data: join(root, "data"), cursor: [] };
+  const T0 = Date.parse("2026-10-05T12:00:00Z");
+  try {
+    const nested = join(roots.data, "opencode", "opencode", "opencode.db");
+    await mkdir(dirname(nested), { recursive: true });
+    const db = new DatabaseSync(nested);
+    db.exec(`CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, parent_id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER);
+      CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);
+      CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);`);
+    db.prepare("INSERT INTO session VALUES ('ses_kimi', 'project', NULL, '/worktree', 'PRIVATE_TITLE', ?, ?, NULL)").run(T0, T0 + 5000);
+    const message = db.prepare("INSERT INTO message VALUES (?, 'ses_kimi', ?, ?, ?)");
+    message.run("u1", T0, T0, JSON.stringify({ role: "user", time: { created: T0 } }));
+    message.run("a1", T0 + 1000, T0 + 1000, JSON.stringify({ role: "assistant", parentID: "u1", modelID: "k3", providerID: "kimi-code", cost: 0, tokens: { input: 40, output: 10, reasoning: 5, cache: { read: 900, write: 60 } }, time: { created: T0 + 1000, completed: T0 + 3000 } }));
+    db.close();
+    // The legacy location is an alias of the same file.
+    await symlink(nested, join(roots.data, "opencode", "opencode.db"));
+
+    const index = new UsageIndex(roots);
+    try {
+      index.snapshot();
+      const snapshot = await index.settled();
+      assert.deepEqual(snapshot.warnings, []);
+      assert.deepEqual(snapshot.sessions.map((s) => [s.id, s.provider, s.coverage]), [["opencode:ses_kimi", "opencode", "available"]]);
+      const m = filterSessions(snapshot.sessions, EMPTY_FILTERS)[0].metrics;
+      // Counted once: uncached 40 + cache read 900 + cache write 60; output includes reasoning once.
+      assert.deepEqual([m.inputTokens, m.uncachedTokens, m.cacheReadTokens, m.cacheWriteTokens, m.outputTokens, m.reasoningTokens, m.requests], [1000, 40, 900, 60, 15, 5, 1]);
+    } finally {
+      index.dispose();
+    }
+
+    // Without the alias, the nested store alone is found.
+    await rm(join(roots.data, "opencode", "opencode.db"));
+    const alone = new UsageIndex(roots);
+    try {
+      alone.snapshot();
+      assert.deepEqual((await alone.settled()).sessions.map((s) => s.id), ["opencode:ses_kimi"]);
+    } finally {
+      alone.dispose();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

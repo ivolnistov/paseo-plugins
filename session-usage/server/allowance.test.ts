@@ -130,8 +130,9 @@ test("allowances come from Paseo's provider usage, validated entry by entry", as
   }), true);
   assert.equal(forced, true);
   assert.deepEqual(result, { fetchedAt: "2026-09-17T12:00:00Z", error: null, providers: [{ providerId: "claude", displayName: "Claude", status: "available", planLabel: "Max", windows: [{ id: "five_hour", label: "Session", usedPct: 15, remainingPct: 85, resetsAt: "2026-09-17T13:10:00Z", tone: "ok" }] }] });
-  assert.deepEqual(allowanceProviders(result, [fixture("a"), fixture("b", "codex")]).map((p) => p.providerId), ["claude"]);
-  assert.deepEqual(allowanceProviders(result, [fixture("b", "codex")]), []);
+  // Configured providers show whether or not this host has their sessions.
+  assert.deepEqual(allowanceProviders(result).map((p) => p.providerId), ["claude"]);
+  assert.deepEqual(allowanceProviders({ ...result, providers: [...result.providers, { providerId: "copilot", displayName: "Copilot", status: "unavailable", windows: [] }] }).map((p) => p.providerId), ["claude"]);
 
   assert.deepEqual(await readAllowances(paseo(), false), { fetchedAt: null, providers: [], error: "Update Paseo to show subscription allowances." });
   assert.deepEqual(await readAllowances(paseo(() => Promise.reject(new Error("Update the host to list provider usage."))), false), { fetchedAt: null, providers: [], error: "Paseo could not report subscription allowances: Update the host to list provider usage." });

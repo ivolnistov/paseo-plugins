@@ -5,7 +5,8 @@ transcripts and the OpenCode, Kilo, Devin CLI, and Cursor session stores on the 
 archived sessions, subagents, and sessions started outside Paseo, then joins them with Paseo's
 project, workspace, and agent records. Agents of other providers are listed from Paseo's records
 with unknown usage. Subscription allowance cards show how much of each provider's limits is used,
-where the tokens went, and how long the allowance lasts at the current pace.
+what balance is left, where the tokens went, and how long the allowance lasts at the current pace.
+They combine Paseo's provider report with the Usage Monitor plugin's readings when it is installed.
 
 ![Session usage](./images/session-usage.png)
 
@@ -32,8 +33,11 @@ where the tokens went, and how long the allowance lasts at the current pace.
   `low` or `xhigh`). A session that changed effort lists each level; sorting uses its highest
   recorded level. Details and CSV include effort too. An em dash means effort was not recorded;
   provider defaults and current agent settings are not inferred for historical usage.
-- **Subscription allowances**, at the top of the page, has a card for each provider that Paseo
-  reports allowance limits for and that has sessions on this host. The cards stay on one line and
+- **Subscription allowances**, at the top of the page, has a card for every configured provider,
+  whether or not it has sessions on this host: each provider Usage Monitor reads, and each provider
+  Paseo reports limits for. A card names its source and when it was read, and says so when the
+  readings are cached (for example after a provider throttled its quota endpoint), when the last
+  check failed, when sign-in is needed, or when Usage Monitor has the provider disabled. The cards stay on one line and
   scroll horizontally when they do not fit. Each limit (for example Claude's
   session, weekly, and weekly Fable limits) is a narrow column with:
   - a 50 px token chart for the current window, by UTC hour for windows up to a day and by UTC
@@ -41,8 +45,10 @@ where the tokens went, and how long the allowance lasts at the current pace.
     blue and output tokens hang below it in orange. Each half is scaled to its own maximum.
     Future slots are dimmed. A slot's total can include activity from shortly before the window
     opened.
-  - Paseo's used percentage and reset time, with a mark for the share of the window that has
-    already passed. Usage to the right of the mark is ahead of time.
+  - the used percentage and reset time, with a mark for the share of the window that has
+    already passed. Usage to the right of the mark is ahead of time. Counts such as
+    `120 / 500 requests` appear only when both are reported; an unknown capacity is never shown
+    as `0 / 0`.
   - a two-line pace projection with the values in bold: "Lasts **4h 8m**" over "**17%** at
     reset", or, in yellow, "Runs out in **3d 6h**" over "**15h** before reset". A used-up
     allowance says "Used up" in red. The projection extrapolates the used percentage over the
@@ -57,12 +63,22 @@ where the tokens went, and how long the allowance lasts at the current pace.
   - from the limit's name: session and five-hour windows are 5 h, daily 24 h, weekly 7 days, and
     monthly one calendar month;
   - otherwise, or when the time left exceeds the named length, from the shortest of 5 h, 24 h,
-    7 days, or one month that covers the time left. A Codex "Session" limit that resets in two
-    days is treated as weekly.
+    7 days, or one month that covers the time left.
+  - Usage Monitor's own window length is used when it reports one.
+  - Codex is the exception: both Paseo and Usage Monitor's Codex preset call the account's
+    weekly limit "Session" (the preset with a 5-hour length), so Codex limits are labelled
+    **Quota** and **Secondary quota**, their length is shown as unverified, and no chart or
+    pace projection is drawn for them. The used percentage and reset time are still shown.
 
+  Balances (DeepSeek, GLM, Codex credits) show the amount left in their currency, for example
+  `$4.29`, or a count such as `2 credits`; they have no percentage bar, chart, or pace. An API
+  balance is not a subscription allowance, so GLM's balance is a separate card from a Z.AI plan.
   Limits that local records cannot be attributed to (surface-scoped limits, code review, Cursor's
   model pools) and providers without local token records show a short note instead of a chart.
-  Allowances refresh every five minutes and with **Refresh**. Provider balances are not shown.
+  Providers whose usage runs through another harness, such as Kimi or MiniMax models used from
+  OpenCode, have no sessions under their own provider ID and say "Not attributed to local
+  sessions" rather than charting OpenCode's tokens against their quota.
+  Allowances refresh every five minutes and with **Refresh**.
 
 ![Subscription allowances](./images/allowances.png)
 
@@ -150,7 +166,8 @@ discounts, tax, and plan charges. It does not infer what you paid for Claude Pro
 **Reported cost** is separate. OpenCode and Kilo record a USD cost per message; Claude transcripts
 rarely contain the SDK's `result.total_cost_usd` events, and Codex, Devin CLI, and Cursor record none. The plugin contacts
 no pricing or provider account API. Subscription allowances come from Paseo, whose daemon queries
-the provider accounts.
+the provider accounts, and from the Usage Monitor plugin, which reads them with its own
+configuration. This plugin holds no provider keys and sends no vendor requests.
 
 ## Data sources and accounting
 
@@ -158,11 +175,12 @@ the provider accounts.
 | --- | --- |
 | Claude | `<config dir>/projects/**/*.jsonl`, including nested `subagents` files, for every Claude configuration directory (see below); default `$CLAUDE_CONFIG_DIR` or `~/.claude` |
 | Codex | `<home>/sessions/**/rollout-*.jsonl` and `<home>/archived_sessions/**/rollout-*.jsonl` for every Codex home (see below); default `$CODEX_HOME` or `~/.codex` |
-| OpenCode, Kilo | `$XDG_DATA_HOME/opencode/opencode.db` and `$XDG_DATA_HOME/kilo/kilo.db`, default `~/.local/share`; only the `session`, `message`, and `part` tables |
+| OpenCode, Kilo | `$XDG_DATA_HOME/opencode/opencode.db`, `$XDG_DATA_HOME/opencode/opencode/opencode.db` (where a launcher points `XDG_DATA_HOME` at `~/.local/share/opencode`) and `$XDG_DATA_HOME/kilo/kilo.db`, default `~/.local/share`; a store reachable through both OpenCode paths is read once; only the `session`, `message`, and `part` tables |
 | Devin CLI | `$XDG_DATA_HOME/devin/cli/sessions.db`, default `~/.local/share`; only the `sessions` and `message_nodes` tables |
 | Cursor | `$CURSOR_CONFIG_DIR/{acp-sessions/*,chats/*/*}/store.db`; without it, both `$XDG_CONFIG_HOME/cursor` (default `~/.config/cursor`) and `~/.cursor`; only the `meta` and `blobs` tables |
 | Paseo | `$PASEO_HOME/projects/{projects,workspaces}.json`, `$PASEO_HOME/agents/*/*.json`, and provider labels from `$PASEO_HOME/config.json`, default `~/.paseo` |
 | Allowances | Paseo's provider usage report (`paseo.providers.listUsage`), which the daemon caches for five minutes; only window names, percentages, reset times, and plan labels are kept |
+| Usage Monitor | The `usage-monitor` plugin's `usage.limits.read` RPC on the same daemon, always with `refresh: false` so Usage Monitor decides when a provider is contacted; only reading names, units, percentages, counts, balances, currencies, reset times, window lengths, fetch times, and whether a reading is cached or failed are kept. Error text, notices, configuration paths, and credentials are dropped |
 | Index | Written by this plugin: `$PASEO_HOME/plugin-data/session-usage/index.sqlite`, or `$PASEO_SESSION_USAGE_DB` |
 
 - **Provider profiles (several accounts).** Paseo providers that extend Claude or Codex and set
@@ -248,8 +266,17 @@ the provider accounts.
   agent records, with unknown usage.
 - Cost figures are a standard short-context API equivalent from a fixed price table, not a bill
   or subscription meter. The plugin contacts no pricing or provider account API.
-- Allowance percentages and reset times are whatever Paseo reports; window lengths are inferred,
-  and the pace projection assumes usage continues at the average rate so far.
+- Allowance percentages and reset times are whatever Paseo or Usage Monitor reports; window
+  lengths are inferred when neither reports one (never for Codex), and the pace projection
+  assumes usage continues at the average rate so far.
+- Usage Monitor readings reach this plugin through `@getpaseo/client/internal/daemon-client`, the
+  daemon's own installed client. Paseo has no public plugin-to-plugin RPC, and its client README
+  calls `internal/*` imports unsupported implementation details, so a Paseo update can break the
+  bridge. The client is loaded from the daemon's installation, so it always matches the host
+  version; a missing or incompatible client, a refused connection, or a slow answer (4 s to
+  connect, 9 s per call) leaves the cards on Paseo's own report with a note. One connection is
+  kept per daemon, results are cached for a minute, and the connection closes when the plugin
+  stops.
 - Message text, tool arguments, tool results, and credentials never leave the daemon parser.
 - An em dash means a measurement is absent; averages divide by known sessions only.
 

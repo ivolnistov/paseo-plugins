@@ -1,7 +1,7 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import { allowancePace, allowanceProviders, allowanceSeries, formatDuration, isSlotSelected, paceLines, toggleAllowanceSlot, usedPercent, windowScope, windowSpan, type AllowanceSeries, type AllowanceSlot, type AllowanceWindow, type Allowances, type ProviderAllowance, type WindowSpan } from "../shared/allowance";
+import { allowancePace, allowanceProviders, allowanceSeries, attributedScope, formatAmount, formatDuration, isSlotSelected, paceLines, providerNotice, quotaCounts, toggleAllowanceSlot, usedPercent, windowSpan, type AllowanceSeries, type AllowanceSlot, type AllowanceWindow, type Allowances, type ProviderAllowance, type WindowSpan } from "../shared/allowance";
 import { formatMetric, type Filters } from "../shared/model";
 import type { Session } from "../shared/schema";
 import { darkSurface, SERIES_COLORS } from "./charts";
@@ -28,14 +28,16 @@ export function AllowanceCards({ allowances, sessions, filters, onFiltersChange,
     const timer = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
-  const providers = allowanceProviders(allowances, sessions);
+  const providers = allowanceProviders(allowances);
   const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
+  const monitor = allowances?.monitor?.status;
   if (!providers.length) return allowances?.error ? <Text testID="allowance-error" style={muted}>Subscription allowances are unavailable. {allowances.error}</Text> : null;
   return <View testID="allowance-cards" style={{ gap: 10 }}>
     <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
       <Text accessibilityRole="header" style={{ color: theme.colors.foreground, fontSize: 16, fontWeight: "600" }}>Subscription allowances</Text>
-      <Text style={muted}>Reported by Paseo{allowances?.fetchedAt ? ` ${formatDuration(now - Date.parse(allowances.fetchedAt))} ago` : ""} · all sessions on this host, regardless of filters</Text>
+      <Text style={muted}>Reported by Paseo{monitor === "ok" ? " and Usage Monitor" : ""}{allowances?.fetchedAt ? ` ${formatDuration(now - Date.parse(allowances.fetchedAt))} ago` : ""} · all sessions on this host, regardless of filters</Text>
     </View>
+    {monitor === "error" || monitor === "timeout" ? <Text testID="allowance-monitor-status" style={muted}>Usage Monitor did not answer{monitor === "timeout" ? " in time" : ""}; showing Paseo's report.</Text> : null}
     {/* One line of cards; narrow screens scroll sideways instead of wrapping. */}
     <ScrollView horizontal testID="allowance-cards-scroll" contentContainerStyle={{ gap: 10 }}>
       {providers.map((provider) => <ProviderCard key={provider.providerId} provider={provider} sessions={sessions} filters={filters} onFiltersChange={onFiltersChange} theme={theme} compact={compact} now={now} />)}
@@ -45,21 +47,46 @@ export function AllowanceCards({ allowances, sessions, filters, onFiltersChange,
 
 function ProviderCard({ provider, sessions, filters, onFiltersChange, theme, compact, now }: Omit<Props, "allowances"> & { provider: ProviderAllowance; now: number }) {
   const padding = compact ? 12 : 14;
-  const count = provider.windows.length;
+  const count = Math.max(1, provider.windows.length);
+  const notice = providerNotice(provider);
+  const problem = provider.status === "error" || provider.problem === "auth" || provider.problem === "error";
+  const muted = { color: theme.colors.foregroundMuted, fontSize: 11 };
+  const age = provider.fetchedAt ? Date.parse(provider.fetchedAt) : NaN;
   return <View testID={`allowance-card-${provider.providerId}`} style={{ width: count * SECTION_WIDTH + (count - 1) * SECTION_GAP + 2 * padding + 2, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 12, padding, gap: 10, backgroundColor: theme.colors.surface1 }}>
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-      <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "600", flexShrink: 1 }}>{provider.displayName}</Text>
-      {provider.planLabel ? <Text numberOfLines={1} style={{ color: theme.colors.foregroundMuted, fontSize: 11, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: theme.colors.surface2 }}>{provider.planLabel}</Text> : null}
+    <View style={{ gap: 2 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Text numberOfLines={1} style={{ color: theme.colors.foreground, fontSize: 15, fontWeight: "600", flexShrink: 1 }}>{provider.displayName}</Text>
+        {provider.planLabel ? <Text numberOfLines={1} style={{ ...muted, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, backgroundColor: theme.colors.surface2 }}>{provider.planLabel}</Text> : null}
+      </View>
+      <Text numberOfLines={1} style={muted}>{provider.source === "usage-monitor" ? "Usage Monitor" : "Paseo"}{Number.isFinite(age) ? ` · ${formatDuration(now - age)} ago` : ""}</Text>
+      {notice ? <Text testID={`allowance-notice-${provider.providerId}`} numberOfLines={2} style={{ ...muted, color: problem ? theme.colors.statusWarning : theme.colors.foregroundMuted }}>{notice}</Text> : null}
     </View>
-    <View style={{ flexDirection: "row", gap: SECTION_GAP }}>
-      {provider.windows.map((window) => <WindowSection key={window.id} provider={provider} window={window} sessions={sessions} filters={filters} onFiltersChange={onFiltersChange} theme={theme} now={now} />)}
-    </View>
+    {provider.windows.length ? <View style={{ flexDirection: "row", gap: SECTION_GAP }}>
+      {provider.windows.map((window) => (window.kind ?? "quota") === "quota"
+        ? <WindowSection key={window.id} provider={provider} window={window} sessions={sessions} filters={filters} onFiltersChange={onFiltersChange} theme={theme} now={now} />
+        : <AmountSection key={window.id} provider={provider} window={window} theme={theme} now={now} />)}
+    </View> : null}
+  </View>;
+}
+
+/** A balance (money or credits left) or a rate state: no percentage bar, chart or pace. */
+function AmountSection({ provider, window, theme, now }: { provider: ProviderAllowance; window: AllowanceWindow; theme: PluginTheme; now: number }) {
+  const text = { color: theme.colors.foreground, fontSize: 13 };
+  const muted = { color: theme.colors.foregroundMuted, fontSize: 12 };
+  const amount = window.kind === "rate" ? window.state ?? null : formatAmount(window.remaining, window.unit, window.currency);
+  const total = window.kind === "balance" ? formatAmount(window.total, window.unit, window.currency) : null;
+  const changesIn = window.kind === "rate" && window.resetsAt ? Date.parse(window.resetsAt) - now : NaN;
+  return <View testID={`allowance-window-${provider.providerId}-${window.id}`} accessible accessibilityLabel={`${window.label}: ${amount ?? "unknown"}${total ? ` of ${total}` : ""}`} style={{ width: SECTION_WIDTH, gap: 6 }}>
+    <Text numberOfLines={1} style={{ ...text, fontWeight: "600" }}>{window.label}</Text>
+    <Text numberOfLines={1} style={{ ...text, fontSize: 18, fontWeight: "500" }}>{amount ?? "—"}</Text>
+    <Text numberOfLines={1} style={muted}>{window.kind === "rate" ? (Number.isFinite(changesIn) ? `changes in ${formatDuration(changesIn)}` : "current state") : total ? `of ${total}` : "remaining"}</Text>
   </View>;
 }
 
 function WindowSection({ provider, window, sessions, filters, onFiltersChange, theme, now }: Omit<Props, "allowances" | "compact"> & { provider: ProviderAllowance; window: AllowanceWindow; now: number }) {
   const span = windowSpan(window, now);
-  const scope = windowScope(window);
+  const scope = attributedScope(window, provider.providerId, sessions);
+  const counts = quotaCounts(window);
   const series = span && scope.kind !== "unattributed" ? allowanceSeries(sessions, provider.providerId, scope, span, now) : null;
   const used = usedPercent(window);
   const pace = allowancePace(window, span, now);
@@ -71,8 +98,9 @@ function WindowSection({ provider, window, sessions, filters, onFiltersChange, t
   const fill = { ok: theme.colors.statusSuccess, warning: theme.colors.statusWarning, danger: theme.colors.statusDanger, default: theme.colors.foregroundMuted }[tone];
   const elapsed = span && span.end > span.start ? Math.min(1, Math.max(0, (now - span.start) / (span.end - span.start))) : null;
   const resetIn = span ? span.end - now : null;
-  const note = !span ? "No reset time"
-    : scope.kind === "unattributed" ? "Not in local records"
+  const note = window.durationTrusted === false ? "Window length unverified"
+    : !span ? "No reset time"
+    : scope.kind === "unattributed" ? (sessions.some((session) => session.provider === provider.providerId) ? "Not in local records" : "Not attributed to local sessions")
     : !series?.hasTokens ? "No local token data"
     : scope.kind === "model" && !series.models.length ? `No ${scope.name} usage`
     : null;
@@ -86,8 +114,10 @@ function WindowSection({ provider, window, sessions, filters, onFiltersChange, t
     <View accessible accessibilityRole="progressbar" accessibilityLabel={`${window.label}: ${used === null ? "usage unknown" : `${Math.round(used)}% used`}${resetIn !== null ? `, resets in ${formatDuration(resetIn)}` : ""}`} style={{ gap: 2 }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "baseline", gap: 6 }}>
         <Text style={{ ...text, fontWeight: "500" }}>{used === null ? "—" : `${Math.round(Math.min(100, Math.max(0, used)))}%`}</Text>
-        {resetIn !== null ? <Text numberOfLines={1} style={muted}>{resetIn > 0 ? `resets in ${formatDuration(resetIn)}` : "resetting"}</Text> : null}
+        {resetIn !== null ? <Text numberOfLines={1} style={muted}>{resetIn > 0 ? `resets in ${formatDuration(resetIn)}` : "resetting"}</Text>
+          : window.resetsAt && Number.isFinite(Date.parse(window.resetsAt)) ? <Text numberOfLines={1} style={muted}>{`resets in ${formatDuration(Date.parse(window.resetsAt) - now)}`}</Text> : null}
       </View>
+      {counts ? <Text numberOfLines={1} style={{ ...muted, fontSize: 11 }}>{counts}</Text> : null}
       <View style={{ height: 10, justifyContent: "center" }}>
         <View style={{ height: 4, borderRadius: 2, overflow: "hidden", backgroundColor: theme.colors.surface2 }}>
           <View style={{ height: 4, borderRadius: 2, width: `${Math.min(100, Math.max(0, used ?? 0))}%`, backgroundColor: fill }} />

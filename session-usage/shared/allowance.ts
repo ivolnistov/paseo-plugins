@@ -12,29 +12,90 @@ export const AllowanceWindowSchema = z.object({
   // Not sent by Paseo today; preferred over the inferred length when present.
   windowSeconds: z.number().finite().positive().nullable().optional(),
   tone: z.enum(["default", "ok", "warning", "danger"]).optional(),
+  // The fields below come from Usage Monitor readings; Paseo's own report omits them.
+  /** A quota is consumed toward a limit, a balance is money or credits left, a rate is a state. Default quota. */
+  kind: z.enum(["quota", "balance", "rate"]).optional(),
+  /** `percent`, `tokens`, `requests`, `credits`, `usd`, … */
+  unit: z.string().nullable().optional(),
+  used: z.number().finite().nullable().optional(),
+  limit: z.number().finite().nullable().optional(),
+  remaining: z.number().finite().nullable().optional(),
+  total: z.number().finite().nullable().optional(),
+  currency: z.string().nullable().optional(),
+  state: z.string().nullable().optional(),
+  /** False when the window's length is unverified: no span, chart or pace is inferred from its name. */
+  durationTrusted: z.boolean().optional(),
 });
 export type AllowanceWindow = z.infer<typeof AllowanceWindowSchema>;
 export const ProviderAllowanceSchema = z.object({
   providerId: z.string(),
   displayName: z.string(),
-  status: z.enum(["available", "unavailable", "error"]),
+  status: z.enum(["available", "unavailable", "error", "disabled"]),
   planLabel: z.string().nullable().optional(),
   windows: z.array(AllowanceWindowSchema),
+  /** Which report the windows come from; Paseo when absent. */
+  source: z.enum(["paseo", "usage-monitor"]).optional(),
+  fetchedAt: z.string().nullable().optional(),
+  /** The source served cached readings, e.g. after the provider throttled its quota endpoint. */
+  stale: z.boolean().optional(),
+  /** Why the provider has no current readings. Never the provider's own error text. */
+  problem: z.enum(["auth", "error", "disabled"]).nullable().optional(),
 });
 export type ProviderAllowance = z.infer<typeof ProviderAllowanceSchema>;
+export const MonitorStatusSchema = z.enum(["ok", "unavailable", "error", "timeout"]);
+export type MonitorStatus = z.infer<typeof MonitorStatusSchema>;
 export const AllowancesSchema = z.object({
   fetchedAt: z.string().nullable(),
   providers: z.array(ProviderAllowanceSchema),
   error: z.string().nullable(),
+  /** The Usage Monitor bridge: `unavailable` when it is not installed or not enabled. */
+  monitor: z.object({ status: MonitorStatusSchema, fetchedAt: z.string().nullable() }).optional(),
 });
 export type Allowances = z.infer<typeof AllowancesSchema>;
 
 const MINUTE = 60_000, HOUR = 3_600_000, DAY = 86_400_000;
 
-/** Providers that report at least one allowance window and have sessions on this host, in Paseo's order. */
-export function allowanceProviders(allowances: Allowances | undefined, sessions: Session[]): ProviderAllowance[] {
-  const used = new Set(sessions.map((session) => session.provider));
-  return (allowances?.providers ?? []).filter((provider) => provider.status === "available" && provider.windows.length && used.has(provider.providerId));
+/**
+ * Every configured provider, in report order, whether or not it has local sessions: Usage Monitor
+ * providers always (an error or disabled state stays visible), Paseo providers with windows or an
+ * error. Paseo lists every known provider as `unavailable` when it is not configured; those stay hidden.
+ */
+export function allowanceProviders(allowances: Allowances | undefined): ProviderAllowance[] {
+  return (allowances?.providers ?? []).filter((provider) => provider.source === "usage-monitor" || provider.status === "error"
+    || (provider.status === "available" && provider.windows.length > 0));
+}
+
+/** A provider's activity is attributable only when local sessions carry its provider ID; harness sessions (e.g. OpenCode) are not billing providers. */
+export function attributedScope(window: AllowanceWindow, providerId: string, sessions: Session[]): AllowanceScope {
+  const scope = windowScope(window);
+  return scope.kind !== "unattributed" && !sessions.some((session) => session.provider === providerId) ? { kind: "unattributed" } : scope;
+}
+
+/** `$4.29` for US dollars, `58.98 EUR` for another currency, `2 credits` otherwise; null when unknown. */
+export function formatAmount(value: number | null | undefined, unit: string | null | undefined, currency?: string | null): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const code = (currency ?? (unit?.toLowerCase() === "usd" ? "USD" : null))?.toUpperCase();
+  if (code === "USD") return `${value < 0 ? "-" : ""}$${Math.abs(value).toFixed(2)}`;
+  if (code) return `${value.toFixed(2)} ${code}`;
+  if (unit === "percent") return `${Math.round(value)}%`;
+  const amount = Number.isInteger(value) ? String(value) : value.toFixed(2);
+  return unit ? `${amount} ${unit}` : amount;
+}
+
+/** `120 / 500 requests` when both counts are reported and the limit is positive; never `0/0` for an unknown capacity. */
+export function quotaCounts(window: AllowanceWindow): string | null {
+  if (typeof window.used !== "number" || typeof window.limit !== "number" || window.limit <= 0) return null;
+  return `${window.used.toLocaleString("en-US")} / ${window.limit.toLocaleString("en-US")}${window.unit && window.unit !== "percent" ? ` ${window.unit}` : ""}`;
+}
+
+/** A short status line for a provider card, or null when its readings are current. */
+export function providerNotice(provider: ProviderAllowance): string | null {
+  if (provider.status === "disabled" || provider.problem === "disabled") return "Disabled in Usage Monitor";
+  if (provider.problem === "auth") return "Sign-in needed; no current readings";
+  if (provider.status === "error" || provider.problem === "error") return provider.windows.length ? "Last readings; the latest check failed" : "Readings unavailable";
+  if (provider.stale) return "Cached readings; the provider limited refreshes";
+  if (!provider.windows.length) return "No readings reported";
+  return null;
 }
 
 export function usedPercent(window: AllowanceWindow): number | null {
@@ -55,6 +116,7 @@ export interface WindowSpan { start: number; end: number; hourly: boolean }
  * 7 d or one month that covers the time left when the name is missing or too short for it.
  */
 export function windowSpan(window: AllowanceWindow, now: number): WindowSpan | null {
+  if ((window.kind ?? "quota") !== "quota" || window.durationTrusted === false) return null;
   const end = Date.parse(window.resetsAt ?? "");
   if (!Number.isFinite(end)) return null;
   const span = (length: number): WindowSpan => ({ start: end - length, end, hourly: length <= DAY });

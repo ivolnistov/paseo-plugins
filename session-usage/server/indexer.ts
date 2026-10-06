@@ -51,7 +51,9 @@ async function sessionStores(roots: Roots, warnings: Set<string>): Promise<{ pro
     }
   }
   return [
-    { provider: "opencode", paths: [join(roots.data, "opencode", "opencode.db")], read: readOpenCodeStore },
+    // OpenCode stores data in `$XDG_DATA_HOME/opencode`. A launcher that points XDG_DATA_HOME at
+    // `~/.local/share/opencode` puts the store one level deeper, so both locations are read.
+    { provider: "opencode", paths: [join(roots.data, "opencode", "opencode.db"), join(roots.data, "opencode", "opencode", "opencode.db")], read: readOpenCodeStore },
     { provider: "kilo", paths: [join(roots.data, "kilo", "kilo.db")], read: readOpenCodeStore },
     { provider: "devin", paths: [join(roots.data, "devin", "cli", "sessions.db")], read: readDevinStore },
     { provider: "cursor", paths: cursor, read: readCursorStore },
@@ -356,6 +358,8 @@ export class UsageIndex {
     for (const group of await sessionStores(this.roots, warnings)) {
       // A session copied into several stores counts once, from its largest copy.
       const stored = new Map<string, { path: string; session: StoreSession }>();
+      // Candidate paths can alias one file through a symlink; each database is read once.
+      const physical = new Set<string>();
       let found = false;
       for (const path of group.paths) {
         if (this.controller.signal.aborted) throw new Error("Scan cancelled");
@@ -370,6 +374,12 @@ export class UsageIndex {
           if (this.storeCache.delete(path)) changes.removedStores.push(path);
           continue;
         }
+        const real = await realpath(path).catch(() => path);
+        if (physical.has(real)) {
+          if (this.storeCache.delete(path)) changes.removedStores.push(path);
+          continue;
+        }
+        physical.add(real);
         let cached = this.storeCache.get(path);
         if (cached?.signature !== signature) {
           try {
